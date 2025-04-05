@@ -1,0 +1,186 @@
+<?php
+namespace App\Services;
+use Illuminate\Support\Facades\Http;
+class OTOService
+{
+    public static function refreshToken()
+    {
+        $data = ["refresh_token" => config('oto.refresh_token')];
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['refresh_token'] : config('oto.test_urls')['refresh_token'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+        ])->post($url, $data);
+        config('oto.access_token', json_decode($response)->access_token);
+        return json_decode($response)->access_token;
+    }
+    public static function checkDeliveryFee($itemDetails = [])
+    {
+        if (!isset($itemDetails['originCity'], $itemDetails['destinationCity'], $itemDetails['weight'], $itemDetails['height'], $itemDetails['width'], $itemDetails['length'])) {
+            return ['error' => __('Missing required item details.')];
+        }
+        $access_token = self::refreshToken();
+        $data = [
+            'weight' => $itemDetails['weight'],
+            'totalDue' => $itemDetails['totalDue'],
+            'originCity' => $itemDetails['originCity'],
+            'destinationCity' => $itemDetails['destinationCity'], // 'jeddah
+            'height' => $itemDetails['height'],
+            'width' => $itemDetails['width'],
+            'length' => $itemDetails['length'],
+        ];
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['check_delivery_fee'] : config('oto.test_urls')['check_delivery_fee'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+        ])->post($url, $data);
+        $responseContent = json_decode($response->getBody()->getContents(), true);
+        if (isset($responseContent['deliveryCompany'])) {
+            $responseResult = $responseContent['deliveryCompany'];
+            $filtered_array = array_filter($responseResult, function ($item) {
+                return $item['price'] > 0;
+            });
+            // $filtered_array = filterSubArrays($responseResult, 'deliveryCompanyName', 'mydhl');
+            // dd($filtered_array);
+            if (empty($filtered_array)) {
+                return [
+                    'success' => false,
+                    'message' => __('No delivery options available for the specified route'),
+                ];
+            }
+            $collection = array_map(function ($item) {
+                return (object) $item;
+            }, $filtered_array);
+            $min_price_company = collect($collection)->sortBy('price')->first();
+            $shipping_price = $min_price_company ? $min_price_company->price : null;
+            // dd($shipping_price);
+            // Check if shipping_price has changed
+            $cart = auth('api')->user()->cart;
+            if ($cart && $cart->shipping_price !== $shipping_price) {
+                $cart->shipping_price = $shipping_price;
+                $cart->save();
+            }
+            return [$shipping_price, $min_price_company];
+        } else {
+            return [
+                'error' => __('This city is not available for shipping'),
+            ];
+        }
+    }
+    public static function createOrder($orderData = [], $customerData = [], $addressData = [], $items = [])
+    {
+        // dd($orderData);
+        $access_token = self::refreshToken();
+        $data = [
+            "orderId" => $orderData['orderId'],
+            "payment_method" => $orderData['payment_method'],
+            "amount" => $orderData['amount'],
+            "amount_due" => $orderData['amount_due'],
+            "customsCurrency" => config('oto.currency'),
+            "packageCount" => $orderData['packageCount'],
+            "packageWeight" => $orderData['packageWeight'],
+            "boxWidth"      => $orderData['boxWidth'],
+            "boxLength"     => $orderData['boxLength'],
+            "boxHeight"    => $orderData['boxHeight'],
+            "orderDate"     => $orderData['orderDate'],
+            "customer" => [
+                "name" => $customerData['name'],
+                "email" => $customerData['email'],
+                "mobile" => $customerData['mobile'],
+                "address" => $addressData['address'],
+                // "district" => $addressData['district'],
+                "city" => $addressData['city'],
+                "country" => $addressData['country'],
+                "lat" => $addressData['lat'],
+                "lon" => $addressData['lon'],
+            ],
+            "items" => $items,
+        ];
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['create_order'] : config('oto.test_urls')['create_order'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+        ])->post($url, $data);
+        $responseResult = json_decode($response->getBody()->getContents(), true);
+        return json_encode($responseResult);
+    }
+    public static function cancelOrder($orderId)
+    {
+        $access_token = self::refreshToken();
+        $data = [
+            'orderId' => $orderId,
+        ];
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['cancel_order'] : config('oto.test_urls')['cancel_order'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+        ])->post($url, $data);
+        $responseResult = json_decode($response->getBody()->getContents(), true);
+        return json_encode($responseResult);
+    }
+    public static function orderStatus($orderId)
+    {
+        $access_token = self::refreshToken();
+        $data = [
+            'orderId' => $orderId,
+        ];
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['order_status'] : config('oto.test_urls')['order_status'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+        ])->post($url, $data);
+        $responseResult = json_decode($response->getBody()->getContents(), true);
+        return json_encode($responseResult);
+    }
+    public static function createShipment($orderId, $deliveryOptionId, $is_admin = null)
+    {
+        if(!$is_admin && !auth('api')->check()) {
+            return response()->json(['status' => 'fail'], 422);
+        }
+        $access_token = self::refreshToken();
+        $data = [
+            'orderId' => $orderId,
+            'deliveryOptionId' => $deliveryOptionId,
+        ];
+        // dd($data);
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['create_shipment'] : config('oto.test_urls')['create_shipment'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+            ])->post($url, $data);
+        $responseResult = json_decode($response->getBody()->getContents(), true);
+        return json_encode($responseResult);
+    }
+    public static function getDeliveryOptions()
+    {
+        $access_token = self::refreshToken();
+        $url = config('oto.mode') == 'live' ? config('oto.live_urls')['get_delivery_options'] : config('oto.test_urls')['get_delivery_options'];
+        $response = Http::withHeaders([
+            'Accept' => 'application/json',
+            'Content-Type' => 'application/json',
+            'Authorization' => 'Bearer ' . $access_token,
+        ])->get($url);
+        $responseResult = json_decode($response->getBody()->getContents(), true)['options'];
+        // $filtered_array = filterSubArrays($responseResult, 'dcName', 'Aramex');
+        $filtered_array = array_filter($responseResult, function ($item) {
+            return $item['dcName'];
+        });
+        // dd($filtered_array);
+        if (empty($filtered_array)) {
+            return [
+                'success' => false,
+                'message' => __('No delivery options available for the specified route'),
+            ];
+        }
+        $collection = array_map(function ($item) {
+            return (object) $item;
+        }, $filtered_array);
+        $dcName_company = collect($collection)->first();
+        return ($dcName_company);
+    }
+}

@@ -1,0 +1,3 @@
+[submodule "vendor/laravel/socialite"]
+	path = vendor/laravel/socialite
+	url = https://github.com/laravel/socialite.git
